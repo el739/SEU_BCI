@@ -17,6 +17,7 @@ from CCA_user import cca_user
 import multiprocessing
 from multiprocessing import shared_memory
 from multiprocessing import Array, Lock
+from matplotlib.collections import LineCollection
 
 # 初始化变量
 freq_list = [26, 27, 29, 27.5, 31, 32, 30.5, 22,
@@ -36,6 +37,7 @@ shm_name = "my_shared_memory"
 shm = shared_memory.SharedMemory(name=shm_name)
 lock = Lock()  # 同样需要锁来避免竞争条件
 filtered_data=np.zeros((8,2000))
+
 def get_eeg_data():
     """持续读取 EEG 数据并更新共享数据。"""
     with lock:
@@ -90,11 +92,15 @@ class App:
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # 创建八条动态折线
-        self.lines = []
-        for i in range(8):
-            line, = self.ax.plot(np.arange(0, 2000), np.zeros(2000), label=f"通道 {i +1}")
-            self.lines.append(line)
+        # 创建动态折线数据  
+        self.num_lines = 8  
+        self.num_points = 2000  
+        data = np.zeros((self.num_lines, self.num_points))  
+        segments = np.array([np.column_stack([np.arange(self.num_points), data[i]]) for i in range(self.num_lines)])  
+
+        # 创建 LineCollection  
+        self.line_collection = LineCollection(segments, linewidths=1)  
+        self.ax.add_collection(self.line_collection)  
 
         self.ax.set_title("EEG Data")
         self.ax.set_xlim(0, 2000)
@@ -172,11 +178,14 @@ class App:
         if not self.is_animating:
             return
         with lock:
-                filtered_data = np.frombuffer(shared_filtered_data.get_obj()).reshape(8,2000)
+            filtered_data = np.frombuffer(shared_filtered_data.get_obj()).reshape(8,2000)
         # print(filtered_data)
-        for i in range(8):
-                self.lines[i].set_ydata(filtered_data[i, :2000]+1000*i-4000)  # 更新通道数据
-        self.canvas.draw()
+        
+        segments = np.array([np.column_stack([np.arange(self.num_points), filtered_data[i] + 1000 * i - 4000]) for i in range(self.num_lines)])  
+        self.line_collection.set_segments(segments)  
+        
+        # self.canvas.draw()
+        self.canvas.draw_idle() #! 只更新需要更新的图形
         output = np.frombuffer(shared_output.get_obj()).reshape(len(freq_list))
 
         print(output)
@@ -208,7 +217,7 @@ class App:
 
                 self.canvas_output.draw()  # 确保画布被更新
 
-        return self.lines
+        return self.line_collection
 
 if __name__ == "__main__":
     a=threading.Thread(target=calculate)
