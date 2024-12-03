@@ -27,7 +27,8 @@ CH_NUM = 9
 THRD_CORR = 0.1
 THRD_CNT = 2
 fifo_queue = queue.Queue()
-
+data_queue = multiprocessing.Queue()
+shm_name = "my_shared_memory"
 g_ssvep_result = -1
 g_counter = 0
 res_prev = -1.0
@@ -35,76 +36,13 @@ res_prev = -1.0
 freq_list = [26, 27, 29, 27.5, 31, 32, 30.5, 22,
              34.5, 28.5, 32.5, 34, 31.5,28, 33.5, 33, 30, 29.5]
 # 3s的时间窗，创建一个队列，只存3s的数据，eeg数据先进先出
+
 eeg_data = np.zeros((CH_NUM, SAMPLE_RATE * WIN_SIZE))
-shm_size = CH_NUM * SAMPLE_RATE * WIN_SIZE * 8  # 每个 float64 是 8 字节
-shm = shared_memory.SharedMemory(create=True, size=shm_size)
+
 
 # 设置中文显示字体
 matplotlib.rcParams['font.sans-serif'] = ['SimHei']  # 中文显示
 matplotlib.rcParams['axes.unicode_minus'] = False  # 负号显示
-
-
-# class App:
-#         def __init__(self, root):
-#             self.root = root
-#             self.root.title("实时显示八个动态折线图")
-#             # 创建一个 4x2 的网格布局
-#             self.figure, self.axes = plt.subplots(4, 2, figsize=(12, 10))
-#             self.canvas = FigureCanvasTkAgg(self.figure, master=root)
-#             self.canvas.draw()
-#             self.canvas.get_tk_widget().place(x=0, y=0)
-#
-#             label1 = tk.Label(root, text="通道", bg="green", font=('Arial', 20))
-#             label1.place(x=0, y=0)
-#
-#             # 创建一个退出按钮
-#             quit_button = tk.Button(root, text="退出", command=root.quit, font=('Arial', 20))
-#             quit_button.place(x=1500, y=850)
-#             # 创建折线图，每个图表对应一个通道
-#             self.lines = []
-#             for i, ax in enumerate(self.axes.flat):
-#                 line, = ax.plot(np.arange(0, eeg_data.shape[1]), eeg_data[i])  # 每个通道绘制一条线
-#                 self.lines.append(line)
-#                 ax.set_title(f"通道 {i + 1}")
-#                 ax.set_xlim(0, 400)  # 设置x轴范围为0到400
-#                 ax.set_ylim(np.min(eeg_data), np.max(eeg_data))
-#
-#             # 添加滚动条，用于选择显示窗口
-#             ax_slider = plt.axes([0.25, 0.05, 0.65, 0.03], facecolor='lightgoldenrodyellow')
-#             self.slider = Slider(ax_slider, '选取时间段', 1, eeg_data.shape[1], valinit=10, valstep=1)
-#
-#             self.slider.on_changed(self.update_average)
-#
-#             # 启动动画，实时更新折线图
-#             self.ani = animation.FuncAnimation(self.figure, self.update, interval=100, blit=True)
-#
-#         def AA(self):
-#             dr = threading.Thread(target=self.__init__)
-#             dr.start()
-#
-#
-#         def update(self, frame):
-#             # 更新每个通道的折线图
-#             for i in range(8):
-#                 self.lines[i].set_ydata(eeg_data[i])  # 使用最新的eeg_data
-#             self.canvas.draw()  # 重绘画布
-#             return self.lines
-#
-#
-#         def update_average(self, val):
-#             # 计算指定时间段的平均值
-#             window_size = int(self.slider.val)
-#             averages = []
-#             for i in range(8):
-#                 if window_size > eeg_data.shape[1]:
-#                     averages.append(np.mean(eeg_data[i]))
-#                 else:
-#                     averages.append(np.mean(eeg_data[i][-window_size:]))
-#             # print(f"Averages over the last {window_size} points: {averages}")
-
-
-
-
 
 
 def cca_fun():
@@ -112,18 +50,23 @@ def cca_fun():
     global res_prev, g_ssvep_result
     # 数据大于0.2s就用时间窗记录
     # print(f"fifo_queue.qsize():{fifo_queue.qsize()}")
-    if fifo_queue.qsize() >= 200 * CH_NUM:
+    if fifo_queue.qsize() >= 200* CH_NUM:
         with lock:
-            for i in range(200):
-                for j in range(CH_NUM):
-                    eeg_data[j, i + int(SAMPLE_RATE * (WIN_SIZE - 0.2))] = fifo_queue.get()
-        # 将上面处理过的数据往队首步进，空出队列后0.2s的位置，用来存放新数据
+            # with open('eeg_data.txt', 'a') as f:
+                for i in range(200):
+                    for j in range(CH_NUM):
+                        value = fifo_queue.get()
+                        eeg_data[j, i + int(SAMPLE_RATE * (WIN_SIZE - 0.2))] = value
+        #                 f.write(f"{value} ")
+        # eeg_data_str = "\n".join([" ".join(map(str, row)) for row in eeg_data])
+
         for i in range(int(SAMPLE_RATE * (WIN_SIZE - 0.2))):
             for j in range(CH_NUM):
                 eeg_data[j, i] = eeg_data[j, i + 200]
-
+    array [:]= eeg_data.flatten()
 
     shared_eeg_data[:] = eeg_data.flatten()  # 将更新后的数组展平成一维，并复制到共享内存
+
     # 每隔0.1s执行一次
     t = Timer(0.1, cca_fun)
     t.start()
@@ -131,50 +74,52 @@ def cca_fun():
 InitCount=0
 
 
-def analysis(shared_eeg_data, lock, shape):
-    print("analysis_fun")
-    global g_counter, res_prev, InitCount
-    InitCount += 1
-    if InitCount >= 6:
-        with lock:
-            eeg_data = np.frombuffer(shared_eeg_data.get_obj()).reshape(shape)  # 将共享数据重新构造为numpy数组
-            window_data = eeg_data[:8, 2300:4300]
-        print(window_data.shape)  # 8 * 2000
-        filtered_data = filter(fs, window_data)
-
-        # cca处理2s中的数据
-        startTime = time.time()
-        res, corr_coeffs, output = cca_user(filtered_data, freq_list, 1000, 450)
-        endTime = time.time()
-        print(f"频率为：{res}, 相关系数为：{corr_coeffs}, 时间：{endTime - startTime}")
-
-        if corr_coeffs > THRD_CORR and res == res_prev:
-            g_counter += 1
-        else:
-            g_counter = 0
-        res_prev = res
-
-        if g_counter >= THRD_CNT:
-            g_ssvep_result = res
-            print(f"g_ssvep_result: {g_ssvep_result}")
-        else:
-            g_ssvep_result = 99
-
-        with open('results.txt', 'w') as f:
-            SendData = f"{InitCount}+{res}+{g_ssvep_result},"
-            f.write("----------------\n")
-            f.seek(0)
-            f.write(SendData)
-            print(f"写入的数据: {SendData}")
-
-
-def process_analysis(shared_eeg_data,lock, shape):
-    while True:
-        analysis(shared_eeg_data,lock, shape)
-        time.sleep(0.5)
+# def analysis(shared_eeg_data, lock, shape):
+#     print("analysis_fun")
+#     global g_counter, res_prev, InitCount
+#
+#     InitCount += 1
+#     if InitCount >= 6:
+#         with lock:
+#             eeg_data = np.frombuffer(shared_eeg_data.get_obj()).reshape(shape)  # 将共享数据重新构造为numpy数组
+#
+#
+#             window_data = eeg_data[:8, 2300:4300]
+#         print(window_data.shape)  # 8 * 2000
+#         filtered_data = filter(fs, window_data)
+#
+#         # cca处理2s中的数据
+#         startTime = time.time()
+#         res, corr_coeffs, output = cca_user(filtered_data, freq_list, 1000, 450)
+#         endTime = time.time()
+#         print(f"频率为：{res}, 相关系数为：{corr_coeffs}, 时间：{endTime - startTime},全部相关系数{output}")
+#         if corr_coeffs > THRD_CORR and res == res_prev:
+#             g_counter += 1
+#         else:
+#             g_counter = 0
+#         res_prev = res
+#
+#         if g_counter >= THRD_CNT:
+#             g_ssvep_result = res
+#             print(f"g_ssvep_result: {g_ssvep_result}")
+#         else:
+#             g_ssvep_result = 99
+#
+#         with open('results.txt', 'w') as f:
+#             SendData = f"{InitCount}+{res}+{g_ssvep_result},"
+#             f.write("----------------\n")
+#             f.seek(0)
+#             f.write(SendData)
+#             print(f"写入的数据: {SendData}")
+#
+#
+# def process_analysis(shared_eeg_data,lock, shape):
+#     while True:
+#         analysis(shared_eeg_data,lock, shape)
+#         time.sleep(0.5)
 
 # load dll as my_dll
-my_dll = ctypes.CDLL("C:/Users/Lenovo/Desktop/脑机接口/LinkMe.dll")
+my_dll = ctypes.CDLL("./LinkMe.dll")
 
 # init functions of dll
 my_dll.dataProtocol.argtypes = (ctypes.POINTER(ctypes.c_ubyte), ctypes.c_int)
@@ -312,11 +257,17 @@ if __name__ == "__main__":
     manager = multiprocessing.Manager()
     lock = multiprocessing.Lock()
     shared_eeg_data = multiprocessing.Array('d', eeg_data.flatten())  # 将数组展平成一维，并通过multiprocessing.Array共享
-    shape = eeg_data.shape  # 记录数组形状以便重新构造
-    # 创建多进程
 
-    s = multiprocessing.Process(target=process_analysis, args=(shared_eeg_data,lock, shape))
-    s.start()
+    shm = shared_memory.SharedMemory(name=shm_name, create=True,size=1024*1024)
+    array = np.ndarray(eeg_data.flatten().shape, dtype=eeg_data.dtype, buffer=shm.buf)
+    # shared_eeg_data = np.ndarray(eeg_data.shape, dtype=eeg_data.dtype, buffer=shm.buf)
+
+
+    shape = eeg_data.shape  # 记录数组形状以便重新构造
+
+
+    # s = multiprocessing.Process(target=process_analysis, args=(shared_eeg_data,lock, shape))
+    # s.start()
 
     cca_fun()
     # 打开串口
@@ -327,12 +278,11 @@ if __name__ == "__main__":
     # 开启p线程解析数据并传输到queue
     p = threading.Thread(target=passData, args=(ser, is_received_data))
     p.start()
-    # root.mainloop()
     while True:
         pass
     s.join()  # 等待子进程结束
-
     # 关闭线程
     is_received_data = False
     # 关闭串口
     closeSerial(ser)
+    # shm.close()
